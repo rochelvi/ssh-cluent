@@ -54,7 +54,48 @@ pub async fn list(s: &SftpSession, path: &str) -> Result<Listing> {
     })
 }
 
+/// Characters Windows does not allow in a file name (plus path separators).
+const FORBIDDEN: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+fn is_reserved_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit())
+}
+
+/// A single, harmless Windows file name: no separators, no `..`, no device names.
+pub fn is_safe_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.ends_with(['.', ' '])
+        && !name.chars().any(|c| c.is_control() || FORBIDDEN.contains(&c))
+        && !is_reserved_device(name)
+}
+
+/// The local target of a download must be an absolute path without `..`
+/// whose file name is safe. Remote file names are attacker-controlled
+/// (on Linux they may contain `\` and `..`), so this is checked here and
+/// not only in the UI.
+pub fn check_local_target(local: &str) -> Result<()> {
+    let p = std::path::Path::new(local);
+    if !p.is_absolute() {
+        anyhow::bail!("Локальный путь должен быть абсолютным");
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        anyhow::bail!("Недопустимый локальный путь: {local}");
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if !is_safe_file_name(&name) {
+        anyhow::bail!("Недопустимое имя файла: {name}");
+    }
+    Ok(())
+}
+
 pub async fn download(s: &SftpSession, remote: &str, local: &str) -> Result<()> {
+    check_local_target(local)?;
     let mut src = s.open(remote).await.context("Не удалось открыть удалённый файл")?;
     let mut dst = tokio::fs::File::create(local)
         .await
@@ -98,4 +139,27 @@ pub fn remove<'a>(
         s.remove_dir(path).await?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_and_bad_names() {
+        for bad in ["..", ".", "", r"a\b", r"..\..\evil.bat", "a/b", "c:x", "NUL", "con.txt", "COM1", "x.", "x ", "a\u{1}b"] {
+            assert!(!is_safe_file_name(bad), "{bad:?} must be rejected");
+        }
+        for ok in ["readme.txt", ".bashrc", "файл.tar.gz", "COM10", "console.log"] {
+            assert!(is_safe_file_name(ok), "{ok:?} must be accepted");
+        }
+    }
+
+    #[test]
+    fn checks_local_target() {
+        assert!(check_local_target(r"C:\Users\u\Downloads\readme.txt").is_ok());
+        assert!(check_local_target(r"C:\Users\u\Downloads\..\..\evil.bat").is_err());
+        assert!(check_local_target(r"relative\file.txt").is_err());
+        assert!(check_local_target(r"C:\Users\u\Downloads\NUL").is_err());
+    }
 }

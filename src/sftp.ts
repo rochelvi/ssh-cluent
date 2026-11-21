@@ -161,7 +161,7 @@ export class SftpPanel {
       return;
     }
     if (files.length === 1) {
-      const target = await save({ defaultPath: files[0].name, title: "Сохранить как" });
+      const target = await save({ defaultPath: safeLocalName(files[0].name), title: "Сохранить как" });
       if (!target) return;
       await this.run(`Скачивание ${files[0].name}…`, () => api.sftpDownload(this.sessionId, this.join(files[0].name), target));
       return;
@@ -171,7 +171,7 @@ export class SftpPanel {
     await this.run("Скачивание…", async () => {
       for (const [i, f] of files.entries()) {
         this.status(`Скачивание ${i + 1}/${files.length}: ${f.name}`);
-        await api.sftpDownload(this.sessionId, this.join(f.name), `${dir}\\${f.name}`);
+        await api.sftpDownload(this.sessionId, this.join(f.name), `${dir}\\${safeLocalName(f.name)}`);
       }
     });
   }
@@ -206,6 +206,20 @@ export class SftpPanel {
       for (const e of items) await api.sftpRemove(this.sessionId, this.join(e.name), e.isDir);
     });
   }
+}
+
+/**
+ * Turns an untrusted remote file name into a safe Windows file name.
+ * On Linux names may contain `\`, `:` or be `..`, which would otherwise let a
+ * malicious server write outside the chosen download folder. The backend
+ * re-checks the final path.
+ */
+export function safeLocalName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  let s = name.replace(/[<>:"/\\|?*\x00-\x1f\x7f]/g, "_").replace(/[. ]+$/, "");
+  if (!s || s === "." || s === "..") s = "_";
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = `_${s}`;
+  return s;
 }
 
 function perms(mode: number): string {

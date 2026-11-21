@@ -4,6 +4,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, errorMessage, ForwardStatus, HostKeyError, HostView, isCmdError, ShellEvent } from "./api";
 import { clear, h } from "./dom";
 import { confirmDialog, promptText } from "./modal";
+import { comboFromEvent, getSettings } from "./settings";
 import { SftpPanel } from "./sftp";
 
 export type SessionStatus = "connecting" | "connected" | "closed";
@@ -61,6 +62,7 @@ export class SessionTab {
   private pending: number[] = [];
   private writing = false;
   private connecting = false;
+  private selectionTimer = 0;
 
   constructor(
     public host: HostView,
@@ -117,19 +119,27 @@ export class SessionTab {
     this.term.onResize(({ cols, rows }) => {
       if (this.sessionId) api.resize(this.sessionId, cols, rows).catch(() => {});
     });
-    // Windows Terminal-style shortcuts:
-    //   Ctrl+C copies when text is selected (otherwise it is a normal ^C), Ctrl+Shift+C always copies;
-    //   Ctrl+V / Ctrl+Shift+V paste.
+    // Copy / paste shortcuts from the settings (rebindable).
     this.term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.metaKey) return true;
-      if (e.code === "KeyC" && (e.shiftKey || this.term.hasSelection())) {
-        const sel = this.term.getSelection();
-        if (sel) writeText(sel).catch(() => {});
-        this.term.clearSelection();
+      if (e.type !== "keydown") return true;
+      const combo = comboFromEvent(e);
+      if (!combo) return true;
+      const { keyCopy, keyPaste } = getSettings();
+
+      if (combo === keyCopy) {
+        if (this.term.hasSelection()) {
+          writeText(this.term.getSelection()).catch(() => {});
+          this.term.clearSelection();
+          e.preventDefault();
+          return false;
+        }
+        // Nothing selected: plain Ctrl+C keeps its terminal meaning (SIGINT);
+        // any other copy shortcut is swallowed so it doesn't send a stray control code.
+        if (combo === "Ctrl+C") return true;
         e.preventDefault();
         return false;
       }
-      if (e.code === "KeyV") {
+      if (combo === keyPaste) {
         // Stop the browser's own paste event so the text isn't inserted twice.
         e.preventDefault();
         this.paste();
@@ -137,16 +147,22 @@ export class SessionTab {
       }
       return true;
     });
-    // PuTTY-style: right click copies the selection, or pastes if nothing is selected.
+
+    // Copy on select (debounced: the selection changes continuously while dragging).
+    this.term.onSelectionChange(() => {
+      if (!getSettings().copyOnSelect) return;
+      window.clearTimeout(this.selectionTimer);
+      this.selectionTimer = window.setTimeout(() => {
+        const sel = this.term.getSelection();
+        if (sel) writeText(sel).catch(() => {});
+      }, 150);
+    });
+
+    // Right click pastes when "copy on select" is on; otherwise it does nothing
+    // (the WebView's own context menu is never shown in the terminal).
     this.termEl.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      const sel = this.term.getSelection();
-      if (sel) {
-        writeText(sel).catch(() => {});
-        this.term.clearSelection();
-      } else {
-        this.paste();
-      }
+      if (getSettings().copyOnSelect) this.paste();
     });
 
     this.resizeObserver = new ResizeObserver(() => this.fitNow());
@@ -171,10 +187,42 @@ export class SessionTab {
     if (this.mode === "sftp" && this.sftp) await this.sftp.upload(paths);
   }
 
-  private paste() {
-    readText()
-      .then((t) => t && this.term.paste(t))
-      .catch(() => {});
+  /**
+   * Pastes the clipboard into the terminal, defensively:
+   *  - control characters (ESC, C1 codes…) are stripped, so clipboard content
+   *    can't inject escape sequences or break out of bracketed paste;
+   *  - text containing a line break is confirmed first unless the remote side
+   *    has bracketed paste on — otherwise it would be executed immediately
+   *    (classic "copied a command from a web page" attack).
+   */
+  private async paste() {
+    let text: string;
+    try {
+      text = await readText();
+    } catch {
+      return;
+    }
+    // eslint-disable-next-line no-control-regex
+    text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/g, "");
+    if (!text || this.status !== "connected") return;
+
+    if (/[\r\n]/.test(text) && !this.term.modes.bracketedPasteMode) {
+      const lines = text.replace(/\r\n?/g, "\n").split("\n");
+      const preview = lines.slice(0, 12).join("\n") + (lines.length > 12 ? "\n…" : "");
+      const ok = await confirmDialog(
+        "Вставить несколько строк?",
+        h(
+          "div",
+          { class: "form" },
+          h("p", {}, "Текст содержит перевод строки — команды будут выполнены сразу после вставки. Проверьте, что именно вставляется:"),
+          h("pre", { class: "paste-preview" }, preview),
+        ),
+        "Вставить",
+      );
+      this.term.focus();
+      if (!ok) return;
+    }
+    this.term.paste(text);
   }
 
   private fitNow() {

@@ -4,8 +4,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, errorMessage, HostView } from "./api";
 import { clear, h } from "./dom";
 import { editHost } from "./hostForm";
+import { importSshConfig } from "./importDialog";
 import { alertDialog, confirmDialog } from "./modal";
 import { SessionTab } from "./session";
+import { loadSettings } from "./settings";
+import { openSettings } from "./settingsDialog";
 
 const tabbar = document.getElementById("tabbar")!;
 const views = document.getElementById("views")!;
@@ -57,6 +60,10 @@ function renderTabs() {
       ),
     );
   }
+  tabbar.append(
+    h("div", { class: "spacer" }),
+    h("button", { class: "icon-btn gear", title: "Настройки", onclick: () => openSettings() }, "⚙"),
+  );
 }
 
 function activate(id: string) {
@@ -101,6 +108,17 @@ home.append(
     "div",
     { class: "home-toolbar" },
     search,
+    h(
+      "button",
+      {
+        class: "btn",
+        title: "Импортировать хосты из ~/.ssh/config",
+        onclick: async () => {
+          if ((await importSshConfig(hosts)) > 0) refreshHosts();
+        },
+      },
+      "Импорт из SSH config",
+    ),
     h(
       "button",
       {
@@ -206,6 +224,18 @@ function card(x: HostView) {
         "button",
         {
           class: "icon-btn",
+          title: "Дублировать",
+          onclick: async (e: MouseEvent) => {
+            e.stopPropagation();
+            if (await editHost(x, { duplicate: true })) refreshHosts();
+          },
+        },
+        "⧉",
+      ),
+      h(
+        "button",
+        {
+          class: "icon-btn",
           title: "Удалить",
           onclick: async (e: MouseEvent) => {
             e.stopPropagation();
@@ -232,4 +262,4 @@ getCurrentWebview()
 renderTabs();
 // Sessions left over from a previous page load have no tab — close them (frees forwarded ports).
 api.disconnectAll().catch(() => {});
-refreshHosts();
+loadSettings().finally(refreshHosts);

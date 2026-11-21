@@ -1,12 +1,15 @@
 mod error;
 mod forward;
 mod known_hosts;
+mod settings;
 mod sftp;
 mod ssh;
+mod ssh_config;
 mod store;
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -16,6 +19,7 @@ use tauri::{ipc::Channel, Manager, State};
 
 struct AppState {
     store: store::Store,
+    settings: settings::SettingsStore,
     known: Arc<known_hosts::KnownHosts>,
     sessions: Mutex<HashMap<String, Arc<ssh::Session>>>,
 }
@@ -38,13 +42,59 @@ fn hosts_list(state: State<'_, AppState>) -> CmdResult<Vec<store::HostView>> {
     Ok(state.store.list()?)
 }
 
+/// `copy_secret_from`: when duplicating a host, take the saved password/passphrase
+/// of that host unless a new `secret` was entered.
 #[tauri::command]
 fn host_save(
     state: State<'_, AppState>,
     host: store::Host,
     secret: Option<String>,
+    copy_secret_from: Option<String>,
 ) -> CmdResult<store::Host> {
+    let secret = match (secret, copy_secret_from) {
+        (Some(s), _) => Some(s),
+        (None, Some(src)) => store::get_secret(&src),
+        (None, None) => None,
+    };
     Ok(state.store.upsert(host, secret)?)
+}
+
+#[tauri::command]
+fn settings_get(state: State<'_, AppState>) -> settings::Settings {
+    state.settings.get()
+}
+
+#[tauri::command]
+fn settings_set(state: State<'_, AppState>, settings: settings::Settings) -> CmdResult<()> {
+    Ok(state.settings.set(&settings)?)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreview {
+    path: String,
+    hosts: Vec<ssh_config::Candidate>,
+}
+
+/// Parses ~/.ssh/config (or the given file) without saving anything.
+#[tauri::command]
+fn ssh_config_preview(state: State<'_, AppState>, path: Option<String>) -> CmdResult<ImportPreview> {
+    let path = match path {
+        Some(p) => PathBuf::from(p),
+        None => ssh_config::default_path().ok_or_else(|| CmdError::Message {
+            message: "Не удалось определить домашнюю папку".into(),
+        })?,
+    };
+    if !path.is_file() {
+        return Err(CmdError::Message {
+            message: format!("Файл не найден: {}", path.display()),
+        });
+    }
+    let hosts = ssh_config::parse(&path, &state.settings.get().default_username)?;
+    Ok(ImportPreview {
+        path: path.display().to_string(),
+        hosts,
+    })
 }
 
 #[tauri::command]
@@ -190,6 +240,16 @@ async fn sftp_rename(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Only one copy may run: two processes would race on hosts.json / settings.json
+        // (the store lock is per process). A second launch just focuses the first window.
+        // Must be the first plugin registered.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -197,6 +257,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             app.manage(AppState {
                 store: store::Store::new(dir.join("hosts.json")),
+                settings: settings::SettingsStore::new(dir.join("settings.json")),
                 known: Arc::new(known_hosts::KnownHosts::new(dir.join("known_hosts"))),
                 sessions: Mutex::new(HashMap::new()),
             });
@@ -206,6 +267,9 @@ pub fn run() {
             hosts_list,
             host_save,
             host_delete,
+            settings_get,
+            settings_set,
+            ssh_config_preview,
             known_hosts_trust,
             ssh_connect,
             ssh_write,

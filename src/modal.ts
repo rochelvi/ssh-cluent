@@ -28,6 +28,8 @@ export function showModal(
       resolve(value);
     };
     const onKey = (e: KeyboardEvent) => {
+      // Shortcut-capture fields record every key themselves, Enter and Esc included.
+      if ((e.target as HTMLElement | null)?.dataset?.keycapture) return;
       if (e.key === "Escape") {
         e.stopPropagation();
         finish(null);

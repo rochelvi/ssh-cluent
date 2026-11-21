@@ -72,10 +72,34 @@ export interface SftpListing {
   entries: SftpEntry[];
 }
 
+export interface Settings {
+  copyOnSelect: boolean;
+  keyCopy: string;
+  keyPaste: string;
+  defaultUsername: string;
+}
+
+export interface ImportCandidate {
+  host: Host;
+  keyMissing: boolean;
+}
+
+export interface ImportPreview {
+  path: string;
+  hosts: ImportCandidate[];
+}
+
 export const api = {
   listHosts: () => invoke<HostView[]>("hosts_list"),
-  /** secret: null = keep, "" = forget, string = store */
-  saveHost: (host: Host, secret: string | null) => invoke<Host>("host_save", { host, secret }),
+  /**
+   * secret: null = keep, "" = forget, string = store.
+   * copySecretFrom: when duplicating, copy the saved secret of that host (if secret is null).
+   */
+  saveHost: (host: Host, secret: string | null, copySecretFrom: string | null = null) =>
+    invoke<Host>("host_save", { host, secret, copySecretFrom }),
+  getSettings: () => invoke<Settings>("settings_get"),
+  setSettings: (settings: Settings) => invoke<void>("settings_set", { settings }),
+  sshConfigPreview: (path: string | null) => invoke<ImportPreview>("ssh_config_preview", { path }),
   deleteHost: (id: string) => invoke<void>("host_delete", { id }),
   trustHostKey: (host: string, port: number, keyLine: string) =>
     invoke<void>("known_hosts_trust", { host, port, keyLine }),

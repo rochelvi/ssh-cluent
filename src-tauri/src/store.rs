@@ -132,14 +132,26 @@ impl Store {
 
     /// `secret`: None = keep as is, Some("") = forget, Some(s) = store.
     pub fn upsert(&self, mut host: Host, secret: Option<String>) -> Result<Host> {
-        if host.hostname.trim().is_empty() {
-            bail!("Не указан адрес хоста");
-        }
-        if host.username.trim().is_empty() {
-            bail!("Не указано имя пользователя");
-        }
         host.hostname = host.hostname.trim().to_string();
         host.username = host.username.trim().to_string();
+        validate_hostname(&host.hostname)?;
+        if host.username.is_empty() {
+            bail!("Не указано имя пользователя");
+        }
+        if host.username.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            bail!("Имя пользователя содержит недопустимые символы");
+        }
+        if host.label.chars().any(char::is_control) || host.group.chars().any(char::is_control) {
+            bail!("Название или группа содержат управляющие символы");
+        }
+        for f in &host.forwards {
+            if !f.bind_host.trim().is_empty() {
+                validate_hostname(f.bind_host.trim())?;
+            }
+            if f.kind != ForwardKind::Dynamic {
+                validate_hostname(&f.target_host)?;
+            }
+        }
         if host.label.trim().is_empty() {
             host.label = host.hostname.clone();
         }
@@ -179,6 +191,25 @@ impl Store {
         delete_secret(id);
         Ok(())
     }
+}
+
+/// A host name / IP literal: no whitespace, control characters or the
+/// characters that have meaning in known_hosts patterns and ssh syntax.
+pub fn validate_hostname(h: &str) -> Result<()> {
+    if h.is_empty() {
+        bail!("Не указан адрес хоста");
+    }
+    if h.len() > 253
+        || h.starts_with('-')
+        || h.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, ',' | '[' | ']' | '/' | '\\' | '@' | '#' | '*' | '?' | '!' | '"' | '\'')
+        })
+    {
+        bail!("Недопустимый адрес хоста: {h:?}");
+    }
+    Ok(())
 }
 
 fn entry(id: &str) -> Option<keyring::Entry> {

@@ -89,6 +89,77 @@ impl client::Handler for Handler {
         }
         Ok(())
     }
+
+    // The server may try to open channels we never asked for. russh accepts
+    // them by default; we never use them, so refuse them outright.
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_session(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
 }
 
 pub type SshHandle = client::Handle<Handler>;
@@ -163,7 +234,10 @@ impl Session {
             Ok(Ok(h)) => h,
         };
 
-        authenticate(&mut handle, host, secret).await?;
+        // A stalled server must not leave the tab "connecting" forever.
+        tokio::time::timeout(Duration::from_secs(60), authenticate(&mut handle, host, secret))
+            .await
+            .map_err(|_| anyhow!("Таймаут аутентификации"))??;
 
         let mut statuses = Vec::new();
 
@@ -185,11 +259,16 @@ impl Session {
             }
         }
 
-        let channel = handle.channel_open_session().await?;
-        channel
-            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-            .await?;
-        channel.request_shell(false).await?;
+        let channel = tokio::time::timeout(Duration::from_secs(30), async {
+            let channel = handle.channel_open_session().await?;
+            channel
+                .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+                .await?;
+            channel.request_shell(false).await?;
+            anyhow::Ok(channel)
+        })
+        .await
+        .map_err(|_| anyhow!("Таймаут открытия сессии"))??;
 
         let handle = Arc::new(handle);
         let (shell_tx, shell_rx) = mpsc::unbounded_channel();
@@ -295,7 +374,12 @@ async fn authenticate(handle: &mut SshHandle, host: &Host, secret: Option<String
                     KeyboardInteractiveAuthResponse::Success => return Ok(()),
                     KeyboardInteractiveAuthResponse::Failure { .. } => break,
                     KeyboardInteractiveAuthResponse::InfoRequest { ref prompts, .. } => {
-                        let answers = prompts.iter().map(|_| password.clone()).collect();
+                        // Only hidden (no-echo) prompts get the password; visible ones
+                        // ("Verification code:", "Username:") must never receive it.
+                        let answers = prompts
+                            .iter()
+                            .map(|p| if p.echo { String::new() } else { password.clone() })
+                            .collect();
                         resp = handle
                             .authenticate_keyboard_interactive_respond(answers)
                             .await?;
