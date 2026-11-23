@@ -52,7 +52,7 @@ npm run release
 Сборки пока не подписаны цифровой подписью. Сверяйте SHA-256 скачанного файла с опубликованным в релизе:
 
 ```powershell
-Get-FileHash .\Cluent-0.1.0-portable.exe -Algorithm SHA256
+Get-FileHash .\Cluent-<версия>-portable.exe -Algorithm SHA256
 ```
 
 ## Структура
