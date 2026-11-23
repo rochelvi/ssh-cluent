@@ -38,25 +38,13 @@ impl AppState {
 }
 
 #[tauri::command]
-fn hosts_list(state: State<'_, AppState>) -> CmdResult<Vec<store::HostView>> {
+fn hosts_list(state: State<'_, AppState>) -> CmdResult<Vec<store::Host>> {
     Ok(state.store.list()?)
 }
 
-/// `copy_secret_from`: when duplicating a host, take the saved password/passphrase
-/// of that host unless a new `secret` was entered.
 #[tauri::command]
-fn host_save(
-    state: State<'_, AppState>,
-    host: store::Host,
-    secret: Option<String>,
-    copy_secret_from: Option<String>,
-) -> CmdResult<store::Host> {
-    let secret = match (secret, copy_secret_from) {
-        (Some(s), _) => Some(s),
-        (None, Some(src)) => store::get_secret(&src),
-        (None, None) => None,
-    };
-    Ok(state.store.upsert(host, secret)?)
+fn host_save(state: State<'_, AppState>, host: store::Host) -> CmdResult<store::Host> {
+    Ok(state.store.upsert(host)?)
 }
 
 #[tauri::command]
@@ -129,7 +117,6 @@ async fn ssh_connect(
     on_event: Channel<ssh::ShellEvent>,
 ) -> CmdResult<ConnectResult> {
     let host = state.store.get(&host_id)?;
-    let secret = secret.or_else(|| store::get_secret(&host.id));
     let (session, forwards) =
         ssh::Session::connect(&host, secret, state.known.clone(), cols, rows, on_event).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -255,8 +242,12 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            let store = store::Store::new(dir.join("hosts.json"));
+            // Passwords are no longer saved: wipe anything older versions left
+            // in Windows Credential Manager.
+            store.purge_legacy_secrets();
             app.manage(AppState {
-                store: store::Store::new(dir.join("hosts.json")),
+                store,
                 settings: settings::SettingsStore::new(dir.join("settings.json")),
                 known: Arc::new(known_hosts::KnownHosts::new(dir.join("known_hosts"))),
                 sessions: Mutex::new(HashMap::new()),

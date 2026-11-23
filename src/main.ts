@@ -1,7 +1,8 @@
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { api, errorMessage, HostView } from "./api";
+import { api, errorMessage, Host } from "./api";
 import { clear, h } from "./dom";
 import { editHost } from "./hostForm";
 import { importSshConfig } from "./importDialog";
@@ -14,10 +15,11 @@ const tabbar = document.getElementById("tabbar")!;
 const views = document.getElementById("views")!;
 const home = document.getElementById("view-home")!;
 
-let hosts: HostView[] = [];
+let hosts: Host[] = [];
 const tabs: SessionTab[] = [];
 let active = "home";
 let filter = "";
+let appVersion = "";
 
 // Disable the WebView's own context menu outside inputs (it would offer "Reload" etc.).
 document.addEventListener("contextmenu", (e) => {
@@ -30,7 +32,7 @@ document.addEventListener("contextmenu", (e) => {
 function renderTabs() {
   clear(tabbar);
   tabbar.append(
-    h("div", { class: "brand" }, h("img", { src: "/icon.svg", alt: "" }), "Cluent"),
+    h("div", { class: "brand", title: appVersion ? `Cluent ${appVersion}` : "Cluent" }, h("img", { src: "/icon.svg", alt: "" }), "Cluent", appVersion ? h("span", { class: "version" }, `v${appVersion}`) : null),
     h("button", { class: "tab" + (active === "home" ? " active" : ""), onclick: () => activate("home") }, "Хосты"),
   );
   for (const t of tabs) {
@@ -73,13 +75,12 @@ function activate(id: string) {
   renderTabs();
 }
 
-async function openHost(host: HostView) {
+async function openHost(host: Host) {
   const tab = new SessionTab({ ...host }, renderTabs);
   tabs.push(tab);
   views.append(tab.el);
   activate(tab.id);
   await tab.start();
-  refreshHosts(); // a password may have been saved during connect
 }
 
 async function closeTab(t: SessionTab) {
@@ -167,7 +168,7 @@ function renderGrid() {
     return;
   }
 
-  const groups = new Map<string, HostView[]>();
+  const groups = new Map<string, Host[]>();
   for (const x of list) {
     const g = x.group || "";
     if (!groups.has(g)) groups.set(g, []);
@@ -188,7 +189,7 @@ function renderGrid() {
   }
 }
 
-function card(x: HostView) {
+function card(x: Host) {
   return h(
     "div",
     { class: "host-card", title: "Подключиться", onclick: () => openHost(x) },
@@ -239,7 +240,7 @@ function card(x: HostView) {
           title: "Удалить",
           onclick: async (e: MouseEvent) => {
             e.stopPropagation();
-            if (await confirmDialog("Удалить хост", `Удалить «${x.label}» и его сохранённый пароль?`, "Удалить", true)) {
+            if (await confirmDialog("Удалить хост", `Удалить «${x.label}»?`, "Удалить", true)) {
               await api.deleteHost(x.id).catch((err) => alertDialog("Ошибка", errorMessage(err)));
               refreshHosts();
             }
@@ -262,4 +263,12 @@ getCurrentWebview()
 renderTabs();
 // Sessions left over from a previous page load have no tab — close them (frees forwarded ports).
 api.disconnectAll().catch(() => {});
+getVersion()
+  .then((v) => {
+    appVersion = v;
+    renderTabs();
+  })
+  .catch(() => {
+    /* version is cosmetic */
+  });
 loadSettings().finally(refreshHosts);

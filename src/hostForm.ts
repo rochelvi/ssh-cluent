@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { homeDir } from "@tauri-apps/api/path";
-import { api, errorMessage, Forward, ForwardKind, Host, HostView } from "./api";
+import { api, errorMessage, Forward, ForwardKind, Host } from "./api";
 import { clear, h } from "./dom";
 import { showModal } from "./modal";
 import { getSettings } from "./settings";
@@ -14,9 +14,9 @@ const KIND_LABEL: Record<ForwardKind, string> = {
 /**
  * Opens the host editor. Resolves true if the host was saved.
  * With `duplicate`, the form is pre-filled from `existing` but saves a new host
- * (same name — the user renames it), and the saved password is copied over.
+ * (same name — the user renames it).
  */
-export async function editHost(existing?: HostView, opts: { duplicate?: boolean } = {}): Promise<boolean> {
+export async function editHost(existing?: Host, opts: { duplicate?: boolean } = {}): Promise<boolean> {
   const duplicate = !!opts.duplicate && !!existing;
   const forwards: Forward[] = structuredClone(existing?.forwards ?? []);
   if (duplicate) for (const f of forwards) f.id = "";
@@ -58,25 +58,10 @@ export async function editHost(existing?: HostView, opts: { duplicate?: boolean 
     "Обзор…",
   );
 
-  const secret = h("input", { type: "password", autocomplete: "off" });
-  const secretLabel = h("span", {});
-  const forget = h("input", { type: "checkbox" });
-  const forgetRow = h("label", { class: "check" }, forget, duplicate ? "Не копировать сохранённый секрет" : "Удалить сохранённый секрет");
-  forgetRow.hidden = !existing?.hasSecret;
-
   const keyRow = h("div", { class: "field" }, h("span", {}, "Файл ключа"), h("div", { class: "row" }, keyPath, browse));
 
   const syncAuth = () => {
-    const isKey = auth.value === "key";
-    keyRow.hidden = !isKey;
-    secretLabel.textContent = isKey ? "Парольная фраза ключа (если есть)" : "Пароль";
-    secret.placeholder = existing?.hasSecret
-      ? duplicate
-        ? "будет скопирован из исходного хоста"
-        : "сохранён — оставьте пустым, чтобы не менять"
-      : isKey
-        ? "необязательно"
-        : "спросить при подключении";
+    keyRow.hidden = auth.value !== "key";
   };
   auth.addEventListener("change", syncAuth);
   syncAuth();
@@ -139,8 +124,6 @@ export async function editHost(existing?: HostView, opts: { duplicate?: boolean 
       h("label", { class: "field" }, h("span", {}, "Аутентификация"), auth),
     ),
     keyRow,
-    h("label", { class: "field" }, secretLabel, secret),
-    forgetRow,
     h("div", { class: "section-title" },
       h("span", {}, "Проброс портов"),
       h("button", {
@@ -183,15 +166,8 @@ export async function editHost(existing?: HostView, opts: { duplicate?: boolean 
       keyPath: auth.value === "key" ? keyPath.value.trim() : null,
       forwards,
     };
-    let secretValue: string | null;
-    let copyFrom: string | null = null;
-    if (secret.value) secretValue = secret.value;
-    else if (duplicate) {
-      secretValue = null;
-      if (existing?.hasSecret && !forget.checked) copyFrom = existing.id;
-    } else secretValue = forget.checked ? "" : null;
     try {
-      await api.saveHost(host, secretValue, copyFrom);
+      await api.saveHost(host);
       return true;
     } catch (e) {
       return showError(errorMessage(e));

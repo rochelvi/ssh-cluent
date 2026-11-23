@@ -1,12 +1,14 @@
 //! Local host storage. Host metadata lives in a JSON file in the app data
-//! directory; passwords and key passphrases live in Windows Credential Manager.
-//! Nothing ever leaves the machine.
+//! directory. Passwords and key passphrases are never stored: they are asked
+//! for on every connection and kept only in memory. Nothing ever leaves the machine.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Mutex};
 
-const KEYRING_SERVICE: &str = "ssh-cluent";
+/// Service name under which older versions saved secrets in Windows Credential
+/// Manager. Used only to wipe those leftovers.
+const LEGACY_KEYRING_SERVICE: &str = "ssh-cluent";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -74,14 +76,6 @@ pub struct Host {
     pub forwards: Vec<Forward>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostView {
-    #[serde(flatten)]
-    pub host: Host,
-    pub has_secret: bool,
-}
-
 pub struct Store {
     path: PathBuf,
     lock: Mutex<()>,
@@ -110,16 +104,19 @@ impl Store {
         Ok(())
     }
 
-    pub fn list(&self) -> Result<Vec<HostView>> {
+    pub fn list(&self) -> Result<Vec<Host>> {
         let _g = self.lock.lock().unwrap();
-        Ok(self
-            .load()?
-            .into_iter()
-            .map(|host| HostView {
-                has_secret: get_secret(&host.id).is_some(),
-                host,
-            })
-            .collect())
+        self.load()
+    }
+
+    /// Removes passwords/passphrases that older versions saved in Windows
+    /// Credential Manager for any of the known hosts.
+    pub fn purge_legacy_secrets(&self) {
+        if let Ok(hosts) = self.list() {
+            for h in hosts {
+                purge_legacy_secret(&h.id);
+            }
+        }
     }
 
     pub fn get(&self, id: &str) -> Result<Host> {
@@ -130,8 +127,7 @@ impl Store {
             .context("host not found")
     }
 
-    /// `secret`: None = keep as is, Some("") = forget, Some(s) = store.
-    pub fn upsert(&self, mut host: Host, secret: Option<String>) -> Result<Host> {
+    pub fn upsert(&self, mut host: Host) -> Result<Host> {
         host.hostname = host.hostname.trim().to_string();
         host.username = host.username.trim().to_string();
         validate_hostname(&host.hostname)?;
@@ -174,12 +170,6 @@ impl Store {
             None => hosts.push(host.clone()),
         }
         self.save(&hosts)?;
-
-        match secret {
-            Some(s) if s.is_empty() => delete_secret(&host.id),
-            Some(s) => set_secret(&host.id, &s)?,
-            None => {}
-        }
         Ok(host)
     }
 
@@ -188,7 +178,7 @@ impl Store {
         let mut hosts = self.load()?;
         hosts.retain(|h| h.id != id);
         self.save(&hosts)?;
-        delete_secret(id);
+        purge_legacy_secret(id);
         Ok(())
     }
 }
@@ -212,23 +202,8 @@ pub fn validate_hostname(h: &str) -> Result<()> {
     Ok(())
 }
 
-fn entry(id: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, id).ok()
-}
-
-pub fn get_secret(id: &str) -> Option<String> {
-    entry(id)?.get_password().ok()
-}
-
-pub fn set_secret(id: &str, secret: &str) -> Result<()> {
-    entry(id)
-        .context("credential store unavailable")?
-        .set_password(secret)
-        .context("saving secret to Windows Credential Manager")
-}
-
-pub fn delete_secret(id: &str) {
-    if let Some(e) = entry(id) {
+fn purge_legacy_secret(id: &str) {
+    if let Ok(e) = keyring::Entry::new(LEGACY_KEYRING_SERVICE, id) {
         let _ = e.delete_credential();
     }
 }

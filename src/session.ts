@@ -1,7 +1,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { api, errorMessage, ForwardStatus, HostKeyError, HostView, isCmdError, ShellEvent } from "./api";
+import { api, errorMessage, ForwardStatus, HostKeyError, Host, isCmdError, ShellEvent } from "./api";
 import { clear, h } from "./dom";
 import { confirmDialog, promptText } from "./modal";
 import { comboFromEvent, getSettings } from "./settings";
@@ -65,7 +65,7 @@ export class SessionTab {
   private selectionTimer = 0;
 
   constructor(
-    public host: HostView,
+    public host: Host,
     private readonly onChange: () => void,
   ) {
     this.term = new Terminal({
@@ -347,19 +347,9 @@ export class SessionTab {
     const isKey = this.host.auth === "key";
     const r = await promptText(isKey ? "Парольная фраза ключа" : `Пароль для ${this.host.username}@${this.host.hostname}`, isKey ? "Парольная фраза" : "Пароль", {
       password: true,
-      offerSave: true,
       hint: reason ?? undefined,
     });
-    if (!r) return null;
-    if (r.save) {
-      try {
-        await api.saveHost(this.host, r.value);
-        this.host.hasSecret = true;
-      } catch {
-        /* saving is best effort */
-      }
-    }
-    return r.value;
+    return r ? r.value : null;
   }
 
   async start() {
@@ -382,7 +372,7 @@ export class SessionTab {
     this.term.write(`\x1b[90mПодключение к ${this.host.username}@${this.host.hostname}:${this.host.port}…\x1b[0m\r\n`);
 
     let secret: string | null = null;
-    if (this.host.auth === "password" && !this.host.hasSecret) {
+    if (this.host.auth === "password") {
       secret = await this.askSecret(null);
       if (secret === null) return this.fail("Отменено");
     }

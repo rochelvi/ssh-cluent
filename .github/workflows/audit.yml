@@ -1,0 +1,32 @@
+name: Dependency audit
+
+# Monthly check of Rust and npm dependencies against published advisories,
+# plus on every change to the lock files.
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  push:
+    paths: ["src-tauri/Cargo.lock", "package-lock.json"]
+  pull_request:
+    paths: ["src-tauri/Cargo.lock", "package-lock.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --file src-tauri/Cargo.lock
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm audit --audit-level=moderate

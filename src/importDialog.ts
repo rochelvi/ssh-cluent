@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, errorMessage, Forward, HostView, ImportCandidate } from "./api";
+import { api, errorMessage, Forward, Host, ImportCandidate } from "./api";
 import { clear, h } from "./dom";
 import { showModal } from "./modal";
 
@@ -12,7 +12,7 @@ function exposed(forwards: Forward[]): string[] {
     .map((f) => `${f.kind === "dynamic" ? "SOCKS" : "L"} ${f.bindHost}:${f.bindPort}`);
 }
 
-function alreadyExists(c: ImportCandidate, hosts: HostView[]) {
+function alreadyExists(c: ImportCandidate, hosts: Host[]) {
   const x = c.host;
   return hosts.some(
     (y) =>
@@ -22,7 +22,7 @@ function alreadyExists(c: ImportCandidate, hosts: HostView[]) {
 }
 
 /** Shows hosts found in ~/.ssh/config and imports the selected ones. Resolves with the number imported. */
-export async function importSshConfig(existing: HostView[]): Promise<number> {
+export async function importSshConfig(existing: Host[]): Promise<number> {
   let candidates: ImportCandidate[] = [];
   let checked: boolean[] = [];
 
@@ -148,7 +148,7 @@ export async function importSshConfig(existing: HostView[]): Promise<number> {
     for (const [i, c] of candidates.entries()) {
       if (!checked[i]) continue;
       try {
-        await api.saveHost({ ...c.host, group: group.value.trim() }, null);
+        await api.saveHost({ ...c.host, group: group.value.trim() });
         imported++;
         checked[i] = false; // never import twice if a later host fails and the user retries
       } catch (e) {

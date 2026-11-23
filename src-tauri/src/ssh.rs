@@ -13,10 +13,10 @@ use russh::{
     client::{self, KeyboardInteractiveAuthResponse},
     keys::{
         load_secret_key,
-        ssh_key::{HashAlg, PublicKey},
-        PrivateKeyWithHashAlg, PublicKeyOrCertificate,
+        ssh_key::{EcdsaCurve, HashAlg, PublicKey},
+        Algorithm, PrivateKeyWithHashAlg, PublicKeyOrCertificate,
     },
-    ChannelMsg, ChannelOpenFailure, Disconnect,
+    cipher, kex, mac, ChannelMsg, ChannelOpenFailure, Disconnect, Preferred,
 };
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
@@ -32,6 +32,49 @@ use crate::{
     known_hosts::{KeyCheck, KnownHosts},
     store::{AuthMethod, ForwardKind, Host},
 };
+
+/// Algorithms offered to the server, pinned here instead of relying on russh
+/// defaults: no SHA-1 (`ssh-rsa` host key signatures, hmac-sha1), no CBC,
+/// no legacy DH groups; strict-kex (Terrapin) is always offered.
+fn preferred_algorithms() -> Preferred {
+    Preferred {
+        kex: std::borrow::Cow::Borrowed(&[
+            kex::MLKEM768X25519_SHA256,
+            kex::CURVE25519,
+            kex::CURVE25519_PRE_RFC_8731,
+            kex::DH_GEX_SHA256,
+            kex::DH_G18_SHA512,
+            kex::DH_G17_SHA512,
+            kex::DH_G16_SHA512,
+            kex::DH_G15_SHA512,
+            kex::DH_G14_SHA256,
+            kex::EXTENSION_SUPPORT_AS_CLIENT,
+            kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+        ]),
+        key: std::borrow::Cow::Borrowed(&[
+            Algorithm::Ed25519,
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 },
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP384 },
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP521 },
+            Algorithm::Rsa { hash: Some(HashAlg::Sha512) },
+            Algorithm::Rsa { hash: Some(HashAlg::Sha256) },
+        ]),
+        cipher: std::borrow::Cow::Borrowed(&[
+            cipher::CHACHA20_POLY1305,
+            cipher::AES_256_GCM,
+            cipher::AES_256_CTR,
+            cipher::AES_192_CTR,
+            cipher::AES_128_CTR,
+        ]),
+        mac: std::borrow::Cow::Borrowed(&[
+            mac::HMAC_SHA512_ETM,
+            mac::HMAC_SHA256_ETM,
+            mac::HMAC_SHA512,
+            mac::HMAC_SHA256,
+        ]),
+        ..Preferred::DEFAULT
+    }
+}
 
 /// Remote (-R) forwards: server-side port -> local target.
 pub type RemoteMap = Arc<StdMutex<HashMap<u32, (String, u16)>>>;
@@ -207,6 +250,7 @@ impl Session {
             inactivity_timeout: None,
             keepalive_interval: Some(Duration::from_secs(20)),
             keepalive_max: 3,
+            preferred: preferred_algorithms(),
             ..Default::default()
         });
         let problem = Arc::new(StdMutex::new(None));
@@ -460,4 +504,24 @@ async fn shell_loop(
         }
     }
     let _ = events.send(ShellEvent::Closed { reason });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_weak_algorithms_offered() {
+        let p = preferred_algorithms();
+        for name in p.kex.iter().map(|n| n.as_ref())
+            .chain(p.cipher.iter().map(|n| n.as_ref()))
+            .chain(p.mac.iter().map(|n| n.as_ref()))
+        {
+            let n = name.to_ascii_lowercase();
+            assert!(!n.contains("cbc") && !n.contains("sha1") && !n.ends_with("-sha1@openssh.com"), "{name}");
+            assert!(!n.contains("group1-") && !n.contains("group-exchange-sha1"), "{name}");
+        }
+        assert!(p.kex.contains(&kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT));
+        assert!(!p.key.contains(&Algorithm::Rsa { hash: None }), "ssh-rsa (SHA-1) must not be offered");
+    }
 }

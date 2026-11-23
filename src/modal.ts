@@ -73,18 +73,16 @@ export async function alertDialog(title: string, message: string) {
 export async function promptText(
   title: string,
   label: string,
-  opts: { initial?: string; password?: boolean; offerSave?: boolean; hint?: string } = {},
-): Promise<{ value: string; save: boolean } | null> {
+  opts: { initial?: string; password?: boolean; hint?: string } = {},
+): Promise<{ value: string } | null> {
   const input = h("input", { type: opts.password ? "password" : "text", value: opts.initial ?? "", spellcheck: false });
-  const save = h("input", { type: "checkbox" });
   const body = h(
     "div",
     { class: "form" },
     opts.hint ? h("p", { class: "muted" }, opts.hint) : null,
     h("label", { class: "field" }, h("span", {}, label), input),
-    opts.offerSave ? h("label", { class: "check" }, save, "Сохранить в Windows Credential Manager") : null,
   );
   const r = await showModal(title, body, [{ label: "OK", value: "ok", kind: "primary" }]);
   if (r !== "ok") return null;
-  return { value: input.value, save: save.checked };
+  return { value: input.value };
 }

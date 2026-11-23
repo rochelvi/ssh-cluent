@@ -24,10 +24,6 @@ export interface Host {
   forwards: Forward[];
 }
 
-export interface HostView extends Host {
-  hasSecret: boolean;
-}
-
 export type ShellEvent =
   | { type: "data"; data: string }
   | { type: "exit"; code: number }
@@ -90,13 +86,8 @@ export interface ImportPreview {
 }
 
 export const api = {
-  listHosts: () => invoke<HostView[]>("hosts_list"),
-  /**
-   * secret: null = keep, "" = forget, string = store.
-   * copySecretFrom: when duplicating, copy the saved secret of that host (if secret is null).
-   */
-  saveHost: (host: Host, secret: string | null, copySecretFrom: string | null = null) =>
-    invoke<Host>("host_save", { host, secret, copySecretFrom }),
+  listHosts: () => invoke<Host[]>("hosts_list"),
+  saveHost: (host: Host) => invoke<Host>("host_save", { host }),
   getSettings: () => invoke<Settings>("settings_get"),
   setSettings: (settings: Settings) => invoke<void>("settings_set", { settings }),
   sshConfigPreview: (path: string | null) => invoke<ImportPreview>("ssh_config_preview", { path }),

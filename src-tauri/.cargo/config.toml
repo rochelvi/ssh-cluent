@@ -1,0 +1,4 @@
+# Hardening flags for Windows builds. Note: a RUSTFLAGS environment variable
+# overrides these, so scripts/release.mjs repeats them.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "control-flow-guard", "-C", "link-arg=/PDBALTPATH:%_PDB%"]
