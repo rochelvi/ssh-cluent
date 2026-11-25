@@ -28,6 +28,9 @@ keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
+
 [profile.release]
 codegen-units = 1
 lto = true
