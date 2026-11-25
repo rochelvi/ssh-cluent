@@ -105,11 +105,8 @@ pub async fn download(s: &SftpSession, remote: &str, local: &str) -> Result<()> 
 async fn save_download(src: &mut (impl AsyncRead + Unpin), local: &Path) -> Result<()> {
     let parent = local.parent().context("Не найдена локальная папка назначения")?;
     let file_name = local.file_name().context("Не указано имя локального файла")?;
-    // On Windows canonicalize supplies the verbatim path needed by tempfile's
-    // native rename, including for paths longer than MAX_PATH.
-    let parent = tokio::fs::canonicalize(parent)
-        .await
-        .context("Не удалось открыть локальную папку назначения")?;
+    #[cfg(windows)]
+    let parent = extended_download_directory(parent)?;
     let target = parent.join(file_name);
     let destination_exists = || DestinationExists(local.display().to_string());
     match tokio::fs::symlink_metadata(&target).await {
@@ -131,6 +128,33 @@ async fn save_download(src: &mut (impl AsyncRead + Unpin), local: &Path) -> Resu
         return Err(error).with_context(|| format!("Не удалось сохранить {}", local.display()));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn extended_download_directory(path: &Path) -> Result<std::path::PathBuf> {
+    use std::{ffi::OsString, path::{Component, Prefix}};
+
+    // Normalize the Win32 spelling without opening the directory or its ancestors.
+    // Some writable SMB directories are reachable through unlistable ancestors.
+    let absolute = std::path::absolute(path).context("Недопустимый путь к папке назначения")?;
+    let mut components = absolute.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        anyhow::bail!("Путь к папке назначения должен быть абсолютным");
+    };
+    let mut verbatim = match prefix.kind() {
+        Prefix::Disk(drive) => OsString::from(format!(r"\\?\{}:", char::from(drive))),
+        Prefix::UNC(server, share) => {
+            let mut root = OsString::from(r"\\?\UNC\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root
+        }
+        Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) => return Ok(absolute),
+        _ => anyhow::bail!("Недопустимый путь к папке назначения"),
+    };
+    verbatim.push(components.as_path());
+    Ok(verbatim.into())
 }
 
 pub async fn upload(s: &SftpSession, local: &str, remote: &str) -> Result<()> {
@@ -464,6 +488,21 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         save_download(&mut &b"second"[..], &absent).await.unwrap();
         assert_eq!(std::fs::read(&absent).unwrap(), b"second");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extends_windows_download_paths_without_opening_ancestors() {
+        let cases = [
+            (r"Z:/parent/storage", r"\\?\Z:\parent\storage"),
+            (r"Z:\", r"\\?\Z:\"),
+            (r"\\server.invalid\share\storage", r"\\?\UNC\server.invalid\share\storage"),
+            (r"\\server.invalid\share", r"\\?\UNC\server.invalid\share"),
+            (r"\\?\UNC\server.invalid\share\storage", r"\\?\UNC\server.invalid\share\storage"),
+        ];
+        for (path, extended) in cases {
+            assert_eq!(extended_download_directory(Path::new(path)).unwrap().as_os_str(), extended);
+        }
     }
 
     #[cfg(windows)]
