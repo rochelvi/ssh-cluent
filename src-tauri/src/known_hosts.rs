@@ -2,7 +2,11 @@
 
 use anyhow::{Context, Result};
 use russh::keys::ssh_key::PublicKey;
-use std::{io::Write, path::PathBuf, sync::Mutex};
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    sync::Mutex,
+};
 
 pub enum KeyCheck {
     Match,
@@ -31,8 +35,11 @@ impl KnownHosts {
         }
     }
 
-    fn read(&self) -> String {
-        std::fs::read_to_string(&self.path).unwrap_or_default()
+    fn read(&self) -> Result<String> {
+        match std::fs::read_to_string(&self.path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            result => result.context("Не удалось прочитать known_hosts"),
+        }
     }
 
     pub fn check(&self, host: &str, port: u16, key: &PublicKey) -> Result<KeyCheck> {
@@ -44,7 +51,7 @@ impl KnownHosts {
         let b64 = parts.next().unwrap_or_default();
 
         let mut known_other_type = false;
-        for l in self.read().lines() {
+        for l in self.read()?.lines() {
             let f: Vec<&str> = l.split_whitespace().collect();
             if f.len() < 3 || f[0].starts_with('#') || !f[0].split(',').any(|h| h == pat) {
                 continue;
@@ -72,7 +79,7 @@ impl KnownHosts {
     pub fn trust(&self, host: &str, port: u16, key_line: &str) -> Result<()> {
         // `host` arrives over IPC: never let it inject extra lines or patterns.
         crate::store::validate_hostname(host)?;
-        let key =PublicKey::from_openssh(key_line.trim()).context("invalid public key")?;
+        let key = PublicKey::from_openssh(key_line.trim()).context("invalid public key")?;
         let line = key.to_openssh()?;
         let mut parts = line.split_whitespace();
         let algo = parts.next().unwrap_or_default().to_string();
@@ -80,21 +87,25 @@ impl KnownHosts {
 
         let _g = self.lock.lock().unwrap();
         let pat = pattern(host, port);
-        let kept: Vec<String> = self
-            .read()
-            .lines()
-            .filter(|l| {
-                let f: Vec<&str> = l.split_whitespace().collect();
-                !(f.len() >= 2 && f[0].split(',').any(|h| h == pat) && f[1] == algo)
-            })
-            .map(str::to_string)
-            .collect();
-
-        let mut file = std::fs::File::create(&self.path).context("writing known_hosts")?;
-        for l in kept {
+        let existing = self.read()?;
+        let parent = self.path.parent().context("Не найдена папка known_hosts")?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)
+            .context("Не удалось создать временный файл known_hosts")?;
+        for l in existing.lines() {
+            if let Some((hosts, fields)) = l.trim_start().split_once(char::is_whitespace) {
+                if !hosts.starts_with('#') && hosts.split(',').any(|h| h == pat) {
+                    let kept: Vec<_> = hosts.split(',').filter(|h| *h != pat).collect();
+                    if !kept.is_empty() {
+                        writeln!(file, "{} {fields}", kept.join(","))?;
+                    }
+                    continue;
+                }
+            }
             writeln!(file, "{l}")?;
         }
         writeln!(file, "{pat} {algo} {b64}")?;
+        file.as_file().sync_all()?;
+        file.persist(&self.path).context("Не удалось обновить known_hosts")?;
         Ok(())
     }
 }
@@ -137,5 +148,30 @@ mod tests {
         assert!(kh.trust("a b", 22, ED_A).is_err());
         assert!(kh.trust("a,b", 22, ED_A).is_err());
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replacement_retires_old_algorithm_and_preserves_other_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, format!("srv,alias {ED_A}\n[srv]:2222 {ED_B}\n")).unwrap();
+        let kh = KnownHosts::new(path);
+
+        kh.trust("srv", 22, ECDSA).unwrap();
+        assert!(matches!(kh.check("srv", 22, &key(ED_A)).unwrap(), KeyCheck::Mismatch));
+        assert!(matches!(kh.check("srv", 22, &key(ECDSA)).unwrap(), KeyCheck::Match));
+        assert!(matches!(kh.check("alias", 22, &key(ED_A)).unwrap(), KeyCheck::Match));
+        assert!(matches!(kh.check("srv", 2222, &key(ED_B)).unwrap(), KeyCheck::Match));
+    }
+
+    #[test]
+    fn unreadable_trust_file_is_not_treated_as_empty_or_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, [0xff]).unwrap();
+        let kh = KnownHosts::new(path.clone());
+        assert!(kh.check("srv", 22, &key(ED_A)).is_err());
+        assert!(kh.trust("srv", 22, ED_A).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), [0xff]);
     }
 }

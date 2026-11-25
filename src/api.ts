@@ -52,6 +52,7 @@ export type HostKeyError = {
 export type CmdError =
   | { kind: "message"; message: string }
   | { kind: "authFailed"; message: string }
+  | { kind: "destinationExists"; message: string }
   | HostKeyError;
 
 export interface SftpEntry {
@@ -120,7 +121,7 @@ export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "kind" in e) {
     const err = e as CmdError;
-    if (err.kind === "message" || err.kind === "authFailed") return err.message;
+    if ("message" in err) return err.message;
     return `Проблема с ключом хоста ${err.host}:${err.port}`;
   }
   return String(e);

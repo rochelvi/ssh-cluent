@@ -1,7 +1,11 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, errorMessage, SftpEntry } from "./api";
+import { api, errorMessage, isCmdError, SftpEntry } from "./api";
 import { basename, clear, formatSize, h } from "./dom";
 import { alertDialog, confirmDialog, promptText } from "./modal";
+
+function remotePath(directory: string, name: string) {
+  return directory.endsWith("/") ? directory + name : `${directory}/${name}`;
+}
 
 export class SftpPanel {
   readonly el: HTMLElement;
@@ -12,7 +16,10 @@ export class SftpPanel {
   private readonly pathInput: HTMLInputElement;
   private readonly tbody: HTMLTableSectionElement;
   private readonly statusEl: HTMLElement;
+  private readonly operationEl: HTMLElement;
   private busy = false;
+  private listingRequest = 0;
+  private loading = false;
 
   constructor(private readonly sessionId: string) {
     this.pathInput = h("input", {
@@ -22,6 +29,7 @@ export class SftpPanel {
     });
     this.tbody = h("tbody", {});
     this.statusEl = h("span", { class: "muted" });
+    this.operationEl = h("span", { class: "muted", hidden: true });
     const btn = (label: string, title: string, fn: () => void) => h("button", { class: "btn small", title, onclick: fn }, label);
 
     this.el = h(
@@ -49,17 +57,13 @@ export class SftpPanel {
           this.tbody,
         ),
       ),
-      h("div", { class: "sftp-status" }, this.statusEl, h("span", { class: "muted small" }, "Перетащите файлы из Проводника, чтобы загрузить")),
+      h("div", { class: "sftp-status" }, h("span", {}, this.statusEl, this.operationEl), h("span", { class: "muted small" }, "Перетащите файлы из Проводника, чтобы загрузить")),
     );
   }
 
   private status(text: string, error = false) {
     this.statusEl.textContent = text;
     this.statusEl.classList.toggle("error", error);
-  }
-
-  private join(name: string) {
-    return this.path.endsWith("/") ? this.path + name : `${this.path}/${name}`;
   }
 
   private parent() {
@@ -69,17 +73,23 @@ export class SftpPanel {
   }
 
   async load(path: string) {
+    const request = ++this.listingRequest;
+    this.loading = true;
     this.status("Загрузка…");
     try {
       const r = await api.sftpList(this.sessionId, path);
+      if (request !== this.listingRequest) return;
       this.path = r.path.replace(/\/{2,}/g, "/") || "/";
       this.entries = r.entries;
       this.selected.clear();
+      this.lastClicked = null;
       this.pathInput.value = this.path;
       this.render();
       this.status(`${r.entries.length} элементов`);
     } catch (e) {
-      this.status(errorMessage(e), true);
+      if (request === this.listingRequest) this.status(errorMessage(e), true);
+    } finally {
+      if (request === this.listingRequest) this.loading = false;
     }
   }
 
@@ -91,7 +101,7 @@ export class SftpPanel {
         {
           class: this.selected.has(e.name) ? "selected" : "",
           onclick: (ev: MouseEvent) => this.select(e.name, ev),
-          ondblclick: () => (e.isDir || e.isLink ? this.load(this.join(e.name)) : this.download([e])),
+          ondblclick: () => (e.isDir || e.isLink ? this.load(remotePath(this.path, e.name)) : this.download([e])),
         },
         h("td", { class: "name" }, h("span", { class: "ficon " + (e.isDir ? "dir" : e.isLink ? "link" : "file") }), e.name),
         h("td", { class: "num" }, e.isDir ? "" : formatSize(e.size)),
@@ -123,87 +133,144 @@ export class SftpPanel {
     return this.entries.filter((e) => this.selected.has(e.name));
   }
 
-  private async run(label: string, fn: () => Promise<void>) {
+  private async run(directory: string, label: string, fn: () => Promise<void | false>) {
     if (this.busy) return;
+    const request = this.listingRequest;
     this.busy = true;
-    this.status(label);
+    this.operationEl.hidden = false;
+    this.statusEl.hidden = true;
+    this.operationEl.textContent = label;
+    let completed = false;
     try {
-      await fn();
+      completed = (await fn()) !== false;
     } catch (e) {
-      this.busy = false;
-      this.status(errorMessage(e), true);
+      if (!this.loading && request === this.listingRequest && this.path === directory) {
+        this.status(errorMessage(e), true);
+      }
       await alertDialog("Ошибка SFTP", errorMessage(e));
-      return;
+    } finally {
+      this.busy = false;
+      this.operationEl.hidden = true;
+      this.statusEl.hidden = false;
     }
-    this.busy = false;
-    await this.load(this.path);
+    if (completed && !this.loading && request === this.listingRequest && this.path === directory) {
+      await this.load(directory);
+    }
+  }
+
+  private async transferBatch(
+    directory: string,
+    label: string,
+    files: { name: string; transfer: () => Promise<void> }[],
+    skipped: string[] = [],
+  ) {
+    await this.run(directory, `${label}…`, async () => {
+      for (const [i, { name, transfer }] of files.entries()) {
+        this.operationEl.textContent = `${label} ${i + 1}/${files.length}: ${name}`;
+        try {
+          await transfer();
+        } catch (e) {
+          if (!isCmdError(e) || e.kind !== "destinationExists") throw e;
+          skipped.push(name);
+        }
+      }
+      if (skipped.length) {
+        await alertDialog("Конфликт имён SFTP", `Пропущены файлы с совпадающими именами: ${skipped.join(", ")}.`);
+      }
+    });
   }
 
   async upload(paths?: string[]) {
+    const directory = this.path;
     if (!paths) {
       const picked = await open({ multiple: true, directory: false, title: "Файлы для загрузки" });
       if (!picked) return;
       paths = Array.isArray(picked) ? picked : [picked];
     }
-    const list = paths;
-    await this.run("Загрузка…", async () => {
-      for (const [i, p] of list.entries()) {
-        this.status(`Загрузка ${i + 1}/${list.length}: ${basename(p)}`);
-        await api.sftpUpload(this.sessionId, p, this.join(basename(p)));
-      }
-    });
+    await this.transferBatch(directory, "Загрузка", paths.map((path) => {
+      const name = basename(path);
+      return { name, transfer: () => api.sftpUpload(this.sessionId, path, remotePath(directory, name)) };
+    }));
   }
 
   async download(entries = this.selectedEntries()) {
+    const directory = this.path;
     const files = entries.filter((e) => !e.isDir);
     if (files.length === 0) {
       this.status("Выберите файлы для скачивания (папки пока не поддерживаются)", true);
       return;
     }
     if (files.length === 1) {
-      const target = await save({ defaultPath: safeLocalName(files[0].name), title: "Сохранить как" });
-      if (!target) return;
-      await this.run(`Скачивание ${files[0].name}…`, () => api.sftpDownload(this.sessionId, this.join(files[0].name), target));
+      const name = files[0].name;
+      await this.run(directory, `Скачивание ${name}…`, async () => {
+        let defaultPath = safeLocalName(name);
+        while (true) {
+          const target = await save({ defaultPath, title: "Сохранить как новый файл" });
+          if (!target) return false;
+          try {
+            await api.sftpDownload(this.sessionId, remotePath(directory, name), target);
+            return;
+          } catch (e) {
+            if (!isCmdError(e) || e.kind !== "destinationExists") throw e;
+            if (!(await confirmDialog("Конфликт имён SFTP", e.message, "Выбрать другое имя"))) return false;
+            defaultPath = target;
+          }
+        }
+      });
       return;
     }
-    const dir = await open({ directory: true, multiple: false, title: "Папка для скачивания" });
+    const targets = files.map((file) => ({ name: file.name, localName: safeLocalName(file.name) }));
+    const nameCounts = new Map<string, number>();
+    for (const { localName } of targets) {
+      const key = localName.toUpperCase();
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    const canDownload = targets.filter(({ localName }) => nameCounts.get(localName.toUpperCase()) === 1);
+    const skipped = targets.filter(({ localName }) => nameCounts.get(localName.toUpperCase()) !== 1).map(({ name }) => name);
+    if (!canDownload.length) {
+      await alertDialog("Конфликт имён SFTP", "Выбранные файлы получат одинаковые имена в Windows. Скачайте их по отдельности под разными именами.");
+      return;
+    }
+    const dir = await open({ directory: true, multiple: false, title: "Папка для скачивания без перезаписи файлов" });
     if (typeof dir !== "string") return;
-    await this.run("Скачивание…", async () => {
-      for (const [i, f] of files.entries()) {
-        this.status(`Скачивание ${i + 1}/${files.length}: ${f.name}`);
-        await api.sftpDownload(this.sessionId, this.join(f.name), `${dir}\\${safeLocalName(f.name)}`);
-      }
-    });
+    await this.transferBatch(directory, "Скачивание", canDownload.map(({ name, localName }) => ({
+      name,
+      transfer: () => api.sftpDownload(this.sessionId, remotePath(directory, name), `${dir}\\${localName}`),
+    })), skipped);
   }
 
   private async mkdir() {
+    const directory = this.path;
     const r = await promptText("Новая папка", "Имя папки");
     if (!r?.value.trim()) return;
-    await this.run("Создание папки…", () => api.sftpMkdir(this.sessionId, this.join(r.value.trim())));
+    await this.run(directory, "Создание папки…", () => api.sftpMkdir(this.sessionId, remotePath(directory, r.value.trim())));
   }
 
   private async rename() {
+    const directory = this.path;
     const [e] = this.selectedEntries();
     if (!e) return;
     const r = await promptText("Переименовать", "Новое имя", { initial: e.name });
     if (!r?.value.trim() || r.value === e.name) return;
-    await this.run("Переименование…", () => api.sftpRename(this.sessionId, this.join(e.name), this.join(r.value.trim())));
+    await this.run(directory, "Переименование…", () =>
+      api.sftpRename(this.sessionId, remotePath(directory, e.name), remotePath(directory, r.value.trim())));
   }
 
   private async remove() {
+    const directory = this.path;
     const items = this.selectedEntries();
     if (items.length === 0) return;
     const what = items.length === 1 ? `«${items[0].name}»` : `${items.length} элементов`;
     const hasDir = items.some((e) => e.isDir);
     const ok = await confirmDialog(
       "Удалить",
-      `Удалить ${what} на сервере${hasDir ? " вместе со всем содержимым папок" : ""}? Это нельзя отменить.`,
+      `Удалить ${what} в ${directory}${hasDir ? " вместе со всем содержимым папок" : ""}? Это нельзя отменить.`,
       "Удалить",
       true,
     );
     if (!ok) return;
-    await this.run("Удаление…", async () => {
-      for (const e of items) await api.sftpRemove(this.sessionId, this.join(e.name), e.isDir);
+    await this.run(directory, "Удаление…", async () => {
+      for (const e of items) await api.sftpRemove(this.sessionId, remotePath(directory, e.name), e.isDir);
     });
   }
 }
