@@ -183,7 +183,7 @@ async fn plan_removal(s: &SftpSession, path: String) -> Result<Vec<Removal>> {
 mod tests {
     use super::*;
     use russh_sftp::{
-        protocol::{File, Handle, Name, Status, StatusCode},
+        protocol::{File, FileAttributes, Handle, Name, Status, StatusCode},
         server::{self, Handler},
     };
     use std::{
@@ -244,7 +244,9 @@ mod tests {
         let mut directories = HashMap::new();
         let mut path = "/selected".to_string();
         for level in 0..=depth {
-            let mut files = vec![File::dummy("notes.txt")];
+            let mut attrs = FileAttributes::default();
+            attrs.set_regular(true);
+            let mut files = vec![File::new("notes.txt", attrs)];
             if level < depth {
                 let mut child = File::dummy("child");
                 child.attrs.set_dir(true);
