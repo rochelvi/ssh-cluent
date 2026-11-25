@@ -212,7 +212,7 @@ export class SftpPanel {
             return;
           } catch (e) {
             if (!isCmdError(e) || e.kind !== "destinationExists") throw e;
-            await alertDialog("Конфликт имён SFTP", e.message);
+            if (!(await confirmDialog("Конфликт имён SFTP", e.message, "Выбрать другое имя"))) return false;
             defaultPath = target;
           }
         }
