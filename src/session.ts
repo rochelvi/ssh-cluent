@@ -62,6 +62,7 @@ export class SessionTab {
   private pending: number[] = [];
   private writing = false;
   private connecting = false;
+  private disposed = false;
   private selectionTimer = 0;
 
   constructor(
@@ -353,7 +354,7 @@ export class SessionTab {
   }
 
   async start() {
-    if (this.connecting || this.status === "connected") return;
+    if (this.disposed || this.connecting || this.status === "connected") return;
     this.connecting = true;
     try {
       await this.connectLoop();
@@ -374,13 +375,23 @@ export class SessionTab {
     let secret: string | null = null;
     if (this.host.auth === "password") {
       secret = await this.askSecret(null);
+      if (this.disposed) return;
       if (secret === null) return this.fail("Отменено");
     }
 
     for (let attempt = 0; attempt < 5; attempt++) {
+      let active = true;
       try {
         this.fitNow();
-        const res = await api.connect(this.host.id, this.term.cols, this.term.rows, secret, (ev) => this.onEvent(ev));
+        const res = await api.connect(this.host.id, this.term.cols, this.term.rows, secret, (ev) => {
+          if (this.disposed || !active) return;
+          if (ev.type === "closed") active = false;
+          this.onEvent(ev);
+        });
+        if (this.disposed || !active) {
+          await api.disconnect(res.sessionId).catch(() => {});
+          return;
+        }
         this.sessionId = res.sessionId;
         this.renderForwards(res.forwards);
         this.setStatus("connected");
@@ -388,18 +399,25 @@ export class SessionTab {
         else this.term.focus();
         return;
       } catch (e) {
+        active = false;
+        if (this.disposed) return;
         if (isCmdError(e) && (e.kind === "hostKeyUnknown" || e.kind === "hostKeyMismatch")) {
-          if (!(await this.confirmHostKey(e))) return this.fail("Ключ хоста не принят");
+          const trusted = await this.confirmHostKey(e);
+          if (this.disposed) return;
+          if (!trusted) return this.fail("Ключ хоста не принят");
           try {
             await api.trustHostKey(e.host, e.port, e.keyLine);
           } catch (err) {
+            if (this.disposed) return;
             return this.fail(errorMessage(err));
           }
+          if (this.disposed) return;
           continue;
         }
         if (isCmdError(e) && e.kind === "authFailed") {
           this.term.write(`\x1b[33m${e.message}\x1b[0m\r\n`);
           secret = await this.askSecret(e.message);
+          if (this.disposed) return;
           if (secret === null) return this.fail("Отменено");
           continue;
         }
@@ -415,6 +433,8 @@ export class SessionTab {
   }
 
   async dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
     this.resizeObserver.disconnect();
     if (this.sessionId) {
       const id = this.sessionId;
