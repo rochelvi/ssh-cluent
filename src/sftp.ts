@@ -133,7 +133,7 @@ export class SftpPanel {
     return this.entries.filter((e) => this.selected.has(e.name));
   }
 
-  private async run(directory: string, label: string, fn: () => Promise<void>) {
+  private async run(directory: string, label: string, fn: () => Promise<void | false>) {
     if (this.busy) return;
     const request = this.listingRequest;
     this.busy = true;
@@ -142,8 +142,7 @@ export class SftpPanel {
     this.operationEl.textContent = label;
     let completed = false;
     try {
-      await fn();
-      completed = true;
+      completed = (await fn()) !== false;
     } catch (e) {
       if (!this.loading && request === this.listingRequest && this.path === directory) {
         this.status(errorMessage(e), true);
@@ -202,10 +201,22 @@ export class SftpPanel {
       return;
     }
     if (files.length === 1) {
-      const target = await save({ defaultPath: safeLocalName(files[0].name), title: "Сохранить как новый файл" });
-      if (!target) return;
-      await this.run(directory, `Скачивание ${files[0].name}…`, () =>
-        api.sftpDownload(this.sessionId, remotePath(directory, files[0].name), target));
+      const name = files[0].name;
+      await this.run(directory, `Скачивание ${name}…`, async () => {
+        let defaultPath = safeLocalName(name);
+        while (true) {
+          const target = await save({ defaultPath, title: "Сохранить как новый файл" });
+          if (!target) return false;
+          try {
+            await api.sftpDownload(this.sessionId, remotePath(directory, name), target);
+            return;
+          } catch (e) {
+            if (!isCmdError(e) || e.kind !== "destinationExists") throw e;
+            await alertDialog("Конфликт имён SFTP", e.message);
+            defaultPath = target;
+          }
+        }
+      });
       return;
     }
     const targets = files.map((file) => ({ name: file.name, localName: safeLocalName(file.name) }));
