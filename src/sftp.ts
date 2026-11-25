@@ -1,5 +1,5 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api, errorMessage, SftpEntry } from "./api";
+import { api, errorMessage, isCmdError, SftpEntry } from "./api";
 import { basename, clear, formatSize, h } from "./dom";
 import { alertDialog, confirmDialog, promptText } from "./modal";
 
@@ -159,6 +159,28 @@ export class SftpPanel {
     }
   }
 
+  private async transferBatch(
+    directory: string,
+    label: string,
+    files: { name: string; transfer: () => Promise<void> }[],
+    skipped: string[] = [],
+  ) {
+    await this.run(directory, `${label}…`, async () => {
+      for (const [i, { name, transfer }] of files.entries()) {
+        this.operationEl.textContent = `${label} ${i + 1}/${files.length}: ${name}`;
+        try {
+          await transfer();
+        } catch (e) {
+          if (!isCmdError(e) || e.kind !== "destinationExists") throw e;
+          skipped.push(name);
+        }
+      }
+      if (skipped.length) {
+        await alertDialog("Конфликт имён SFTP", `Пропущены файлы с совпадающими именами: ${skipped.join(", ")}.`);
+      }
+    });
+  }
+
   async upload(paths?: string[]) {
     const directory = this.path;
     if (!paths) {
@@ -166,13 +188,10 @@ export class SftpPanel {
       if (!picked) return;
       paths = Array.isArray(picked) ? picked : [picked];
     }
-    const list = paths;
-    await this.run(directory, "Загрузка…", async () => {
-      for (const [i, p] of list.entries()) {
-        this.operationEl.textContent = `Загрузка ${i + 1}/${list.length}: ${basename(p)}`;
-        await api.sftpUpload(this.sessionId, p, remotePath(directory, basename(p)));
-      }
-    });
+    await this.transferBatch(directory, "Загрузка", paths.map((path) => {
+      const name = basename(path);
+      return { name, transfer: () => api.sftpUpload(this.sessionId, path, remotePath(directory, name)) };
+    }));
   }
 
   async download(entries = this.selectedEntries()) {
@@ -189,19 +208,24 @@ export class SftpPanel {
         api.sftpDownload(this.sessionId, remotePath(directory, files[0].name), target));
       return;
     }
-    const names = files.map((file) => safeLocalName(file.name));
-    if (new Set(names.map((name) => name.toUpperCase())).size !== names.length) {
-      await alertDialog("Ошибка SFTP", "Несколько файлов получат одинаковое имя в Windows. Скачайте их по отдельности под разными именами.");
+    const targets = files.map((file) => ({ name: file.name, localName: safeLocalName(file.name) }));
+    const nameCounts = new Map<string, number>();
+    for (const { localName } of targets) {
+      const key = localName.toUpperCase();
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    const canDownload = targets.filter(({ localName }) => nameCounts.get(localName.toUpperCase()) === 1);
+    const skipped = targets.filter(({ localName }) => nameCounts.get(localName.toUpperCase()) !== 1).map(({ name }) => name);
+    if (!canDownload.length) {
+      await alertDialog("Конфликт имён SFTP", "Выбранные файлы получат одинаковые имена в Windows. Скачайте их по отдельности под разными именами.");
       return;
     }
     const dir = await open({ directory: true, multiple: false, title: "Папка для скачивания без перезаписи файлов" });
     if (typeof dir !== "string") return;
-    await this.run(directory, "Скачивание…", async () => {
-      for (const [i, f] of files.entries()) {
-        this.operationEl.textContent = `Скачивание ${i + 1}/${files.length}: ${f.name}`;
-        await api.sftpDownload(this.sessionId, remotePath(directory, f.name), `${dir}\\${names[i]}`);
-      }
-    });
+    await this.transferBatch(directory, "Скачивание", canDownload.map(({ name, localName }) => ({
+      name,
+      transfer: () => api.sftpDownload(this.sessionId, remotePath(directory, name), `${dir}\\${localName}`),
+    })), skipped);
   }
 
   private async mkdir() {

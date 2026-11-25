@@ -151,6 +151,9 @@ async fn save_upload(
     let name_start = remote.rfind('/').map_or(0, |separator| separator + 1);
     let (prefix, name) = remote.split_at(name_start);
     ensure!(is_remote_name(name), "Недопустимое имя удалённого файла");
+    if s.symlink_metadata(remote).await.is_ok() {
+        return Err(DestinationExists(remote.to_string()).into());
+    }
     let temporary = format!("{prefix}.cluent-{}.part", uuid::Uuid::new_v4());
     let dst = s
         .open_with_flags(&temporary, OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE)
@@ -158,9 +161,9 @@ async fn save_upload(
         .context("Не удалось создать временный файл на сервере")?;
     if let Err(error) = finish_upload(s, src, dst, &temporary, remote).await {
         if let Err(cleanup) = s.remove_file(&temporary).await {
-            return Err(error.context(format!(
-                "Не удалось удалить временный файл {temporary}: {cleanup}"
-            )));
+            anyhow::bail!(
+                "{error:#}. Не удалось удалить временный файл {temporary}: {cleanup}"
+            );
         }
         return Err(error);
     }
@@ -179,9 +182,13 @@ async fn finish_upload(
     transfer.context("Загрузка прервана")?;
     closed.context("Не удалось закрыть файл на сервере")?;
     // The standard SFTP v3 rename refuses an existing destination.
-    s.rename(temporary, remote)
-        .await
-        .with_context(|| format!("Не удалось сохранить {remote}. Проверьте имя и права доступа"))
+    if let Err(error) = s.rename(temporary, remote).await {
+        if s.symlink_metadata(remote).await.is_ok() {
+            return Err(DestinationExists(remote.to_string()).into());
+        }
+        return Err(error).with_context(|| format!("Не удалось сохранить {remote}. Проверьте имя и права доступа"));
+    }
+    Ok(())
 }
 
 fn is_remote_name(name: &str) -> bool {
@@ -481,6 +488,15 @@ mod tests {
             StatusCode::OpUnsupported
         }
 
+        async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            if !self.0.lock().unwrap().contains_key(&path) {
+                return Err(StatusCode::NoSuchFile);
+            }
+            let mut attrs = FileAttributes::default();
+            attrs.set_regular(true);
+            Ok(Attrs { id, attrs })
+        }
+
         async fn open(
             &mut self, id: u32, path: String, flags: OpenFlags, _: FileAttributes,
         ) -> Result<Handle, Self::Error> {
@@ -532,7 +548,10 @@ mod tests {
         let s = SftpSession::new(client).await.unwrap();
 
         assert!(save_upload(&s, &mut InterruptedRead(false), "/dir/other.txt").await.is_err());
-        assert!(save_upload(&s, &mut &b"new"[..], "/dir/notes.txt").await.is_err());
+        let mut src = InterruptedRead(false);
+        let error = save_upload(&s, &mut src, "/dir/notes.txt").await.unwrap_err();
+        assert!(error.is::<DestinationExists>());
+        assert!(!src.0, "the transfer must not start for an existing destination");
         assert_eq!(*files.lock().unwrap(), HashMap::from([("/dir/notes.txt".into(), b"original".to_vec())]));
         save_upload(&s, &mut &b"new"[..], "/dir/other.txt").await.unwrap();
         let files = files.lock().unwrap();
