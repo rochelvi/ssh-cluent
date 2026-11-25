@@ -104,8 +104,15 @@ pub async fn download(s: &SftpSession, remote: &str, local: &str) -> Result<()> 
 
 async fn save_download(src: &mut (impl AsyncRead + Unpin), local: &Path) -> Result<()> {
     let parent = local.parent().context("Не найдена локальная папка назначения")?;
+    let file_name = local.file_name().context("Не указано имя локального файла")?;
+    // On Windows canonicalize supplies the verbatim path needed by tempfile's
+    // native rename, including for paths longer than MAX_PATH.
+    let parent = tokio::fs::canonicalize(parent)
+        .await
+        .context("Не удалось открыть локальную папку назначения")?;
+    let target = parent.join(file_name);
     let destination_exists = || DestinationExists(local.display().to_string());
-    match tokio::fs::symlink_metadata(local).await {
+    match tokio::fs::symlink_metadata(&target).await {
         Ok(_) => return Err(destination_exists().into()),
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("Не удалось проверить локальный файл"),
@@ -117,7 +124,7 @@ async fn save_download(src: &mut (impl AsyncRead + Unpin), local: &Path) -> Resu
     tokio::io::copy(src, &mut dst).await.context("Скачивание прервано")?;
     dst.sync_all().await.context("Не удалось сохранить скачанные данные")?;
     drop(dst);
-    if let Err(error) = temporary.persist_noclobber(local) {
+    if let Err(error) = temporary.persist_noclobber(target) {
         if error.error.kind() == ErrorKind::AlreadyExists {
             return Err(destination_exists().into());
         }
@@ -450,6 +457,19 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         save_download(&mut &b"second"[..], &absent).await.unwrap();
         assert_eq!(std::fs::read(&absent).unwrap(), b"second");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn download_publishes_to_a_long_windows_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("a".repeat(120)).join("b".repeat(120));
+        std::fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("notes.txt");
+        assert!(path.as_os_str().len() > 260);
+
+        save_download(&mut &b"complete"[..], &path).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"complete");
     }
 
     struct UploadFixture(Arc<Mutex<HashMap<String, Vec<u8>>>>);
