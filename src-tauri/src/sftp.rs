@@ -1,8 +1,9 @@
+use crate::error::DestinationExists;
 use anyhow::{ensure, Context, Result};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 
 #[derive(Serialize)]
@@ -95,18 +96,20 @@ pub fn check_local_target(local: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn download(s: &SftpSession, remote: &str, local: &str, overwrite: bool) -> Result<()> {
+pub async fn download(s: &SftpSession, remote: &str, local: &str) -> Result<()> {
     check_local_target(local)?;
     let mut src = s.open(remote).await.context("Не удалось открыть удалённый файл")?;
-    save_download(&mut src, Path::new(local), overwrite).await
+    save_download(&mut src, Path::new(local)).await
 }
 
-async fn save_download(
-    src: &mut (impl AsyncRead + Unpin),
-    local: &Path,
-    overwrite: bool,
-) -> Result<()> {
+async fn save_download(src: &mut (impl AsyncRead + Unpin), local: &Path) -> Result<()> {
     let parent = local.parent().context("Не найдена локальная папка назначения")?;
+    let destination_exists = || DestinationExists(local.display().to_string());
+    match tokio::fs::symlink_metadata(local).await {
+        Ok(_) => return Err(destination_exists().into()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Не удалось проверить локальный файл"),
+    }
     let (file, temporary) = tempfile::NamedTempFile::new_in(parent)
         .context("Не удалось создать временный файл в папке назначения")?
         .into_parts();
@@ -114,12 +117,12 @@ async fn save_download(
     tokio::io::copy(src, &mut dst).await.context("Скачивание прервано")?;
     dst.sync_all().await.context("Не удалось сохранить скачанные данные")?;
     drop(dst);
-    if overwrite {
-        temporary.persist(local)
-    } else {
-        temporary.persist_noclobber(local)
+    if let Err(error) = temporary.persist_noclobber(local) {
+        if error.error.kind() == ErrorKind::AlreadyExists {
+            return Err(destination_exists().into());
+        }
+        return Err(error).with_context(|| format!("Не удалось сохранить {}", local.display()));
     }
-    .with_context(|| format!("Не удалось сохранить {}", local.display()))?;
     Ok(())
 }
 
@@ -433,19 +436,19 @@ mod tests {
         std::fs::write(&path, b"original").unwrap();
         let case_variant = dir.path().join("NOTES.txt");
         if case_variant.exists() {
-            assert!(save_download(&mut &b"new"[..], &case_variant, false).await.is_err());
+            assert!(save_download(&mut &b"new"[..], &case_variant).await.is_err());
         }
-        assert!(save_download(&mut &b"new"[..], &path, false).await.is_err());
-        assert!(save_download(&mut InterruptedRead(false), &path, true).await.is_err());
+        let mut src = InterruptedRead(false);
+        let error = save_download(&mut src, &path).await.unwrap_err();
+        assert!(error.is::<DestinationExists>());
+        assert!(!src.0, "the transfer must not start for an existing destination");
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
 
         let absent = dir.path().join("other.txt");
-        assert!(save_download(&mut InterruptedRead(false), &absent, false).await.is_err());
+        assert!(save_download(&mut InterruptedRead(false), &absent).await.is_err());
         assert!(!absent.exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        save_download(&mut &b"new"[..], &path, true).await.unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"new");
-        save_download(&mut &b"second"[..], &absent, false).await.unwrap();
+        save_download(&mut &b"second"[..], &absent).await.unwrap();
         assert_eq!(std::fs::read(&absent).unwrap(), b"second");
     }
 

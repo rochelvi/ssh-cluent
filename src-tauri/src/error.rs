@@ -8,6 +8,9 @@ pub enum CmdError {
     Message {
         message: String,
     },
+    DestinationExists {
+        message: String,
+    },
     /// Authentication failed — the UI should ask for a password / passphrase and retry.
     AuthFailed {
         message: String,
@@ -53,6 +56,16 @@ impl fmt::Display for AuthFailed {
 }
 impl std::error::Error for AuthFailed {}
 
+#[derive(Debug)]
+pub struct DestinationExists(pub String);
+
+impl fmt::Display for DestinationExists {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Файл уже существует. Выберите другое имя. {}", self.0)
+    }
+}
+impl std::error::Error for DestinationExists {}
+
 impl From<anyhow::Error> for CmdError {
     fn from(e: anyhow::Error) -> Self {
         if let Some(p) = e.downcast_ref::<HostKeyProblem>() {
@@ -76,6 +89,11 @@ impl From<anyhow::Error> for CmdError {
         if let Some(a) = e.downcast_ref::<AuthFailed>() {
             return CmdError::AuthFailed {
                 message: a.0.clone(),
+            };
+        }
+        if let Some(destination) = e.downcast_ref::<DestinationExists>() {
+            return CmdError::DestinationExists {
+                message: destination.to_string(),
             };
         }
         CmdError::Message {

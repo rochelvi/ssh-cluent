@@ -52,6 +52,7 @@ export type HostKeyError = {
 export type CmdError =
   | { kind: "message"; message: string }
   | { kind: "authFailed"; message: string }
+  | { kind: "destinationExists"; message: string }
   | HostKeyError;
 
 export interface SftpEntry {
@@ -106,8 +107,8 @@ export const api = {
   disconnectAll: () => invoke<void>("ssh_disconnect_all"),
 
   sftpList: (sessionId: string, path: string) => invoke<SftpListing>("sftp_list", { sessionId, path }),
-  sftpDownload: (sessionId: string, remote: string, local: string, overwrite: boolean) =>
-    invoke<void>("sftp_download", { sessionId, remote, local, overwrite }),
+  sftpDownload: (sessionId: string, remote: string, local: string) =>
+    invoke<void>("sftp_download", { sessionId, remote, local }),
   sftpUpload: (sessionId: string, local: string, remote: string) =>
     invoke<void>("sftp_upload", { sessionId, local, remote }),
   sftpMkdir: (sessionId: string, path: string) => invoke<void>("sftp_mkdir", { sessionId, path }),
@@ -120,7 +121,7 @@ export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "kind" in e) {
     const err = e as CmdError;
-    if (err.kind === "message" || err.kind === "authFailed") return err.message;
+    if ("message" in err) return err.message;
     return `Проблема с ключом хоста ${err.host}:${err.port}`;
   }
   return String(e);

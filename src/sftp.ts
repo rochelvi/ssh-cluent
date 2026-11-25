@@ -183,10 +183,10 @@ export class SftpPanel {
       return;
     }
     if (files.length === 1) {
-      const target = await save({ defaultPath: safeLocalName(files[0].name), title: "Сохранить как" });
+      const target = await save({ defaultPath: safeLocalName(files[0].name), title: "Сохранить как новый файл" });
       if (!target) return;
       await this.run(directory, `Скачивание ${files[0].name}…`, () =>
-        api.sftpDownload(this.sessionId, remotePath(directory, files[0].name), target, true));
+        api.sftpDownload(this.sessionId, remotePath(directory, files[0].name), target));
       return;
     }
     const names = files.map((file) => safeLocalName(file.name));
@@ -199,7 +199,7 @@ export class SftpPanel {
     await this.run(directory, "Скачивание…", async () => {
       for (const [i, f] of files.entries()) {
         this.operationEl.textContent = `Скачивание ${i + 1}/${files.length}: ${f.name}`;
-        await api.sftpDownload(this.sessionId, remotePath(directory, f.name), `${dir}\\${names[i]}`, false);
+        await api.sftpDownload(this.sessionId, remotePath(directory, f.name), `${dir}\\${names[i]}`);
       }
     });
   }
