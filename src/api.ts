@@ -106,8 +106,8 @@ export const api = {
   disconnectAll: () => invoke<void>("ssh_disconnect_all"),
 
   sftpList: (sessionId: string, path: string) => invoke<SftpListing>("sftp_list", { sessionId, path }),
-  sftpDownload: (sessionId: string, remote: string, local: string) =>
-    invoke<void>("sftp_download", { sessionId, remote, local }),
+  sftpDownload: (sessionId: string, remote: string, local: string, overwrite: boolean) =>
+    invoke<void>("sftp_download", { sessionId, remote, local, overwrite }),
   sftpUpload: (sessionId: string, local: string, remote: string) =>
     invoke<void>("sftp_upload", { sessionId, local, remote }),
   sftpMkdir: (sessionId: string, path: string) => invoke<void>("sftp_mkdir", { sessionId, path }),

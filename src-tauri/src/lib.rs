@@ -174,9 +174,10 @@ async fn sftp_download(
     session_id: String,
     remote: String,
     local: String,
+    overwrite: bool,
 ) -> CmdResult<()> {
     let s = state.session(&session_id)?.sftp().await?;
-    Ok(sftp::download(&s, &remote, &local).await?)
+    Ok(sftp::download(&s, &remote, &local, overwrite).await?)
 }
 
 #[tauri::command]
