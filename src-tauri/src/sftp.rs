@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use std::{future::Future, pin::Pin};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Serialize)]
@@ -118,32 +117,53 @@ pub async fn upload(s: &SftpSession, local: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remove<'a>(
-    s: &'a SftpSession,
-    path: String,
-    is_dir: bool,
-) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        if !is_dir {
-            s.remove_file(path).await?;
-            return Ok(());
+const MAX_REMOVE_DEPTH: usize = 64;
+
+fn check_remove_depth(depth: usize) -> Result<()> {
+    ensure!(
+        depth <= MAX_REMOVE_DEPTH,
+        "Удаление SFTP остановлено: превышена допустимая глубина каталогов ({MAX_REMOVE_DEPTH})"
+    );
+    Ok(())
+}
+
+pub async fn remove(s: &SftpSession, path: String, is_dir: bool) -> Result<()> {
+    if is_dir {
+        remove_dir(s, path, 0).await?;
+    } else {
+        s.remove_file(path).await?;
+    }
+    Ok(())
+}
+
+async fn remove_dir(s: &SftpSession, path: String, depth: usize) -> Result<()> {
+    check_remove_depth(depth)?;
+    for e in s.read_dir(path.clone()).await? {
+        let name = e.file_name();
+        if name == "." || name == ".." {
+            continue;
         }
-        for e in s.read_dir(path.clone()).await? {
-            let name = e.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
-            let child = format!("{}/{}", path.trim_end_matches('/'), name);
-            remove(s, child, e.file_type().is_dir()).await?;
+        let child = format!("{}/{}", path.trim_end_matches('/'), name);
+        if e.file_type().is_dir() {
+            Box::pin(remove_dir(s, child, depth + 1)).await?;
+        } else {
+            s.remove_file(child).await?;
         }
-        s.remove_dir(path).await?;
-        Ok(())
-    })
+    }
+    s.remove_dir(path).await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_remove_directory_depth() {
+        assert!(check_remove_depth(0).is_ok());
+        assert!(check_remove_depth(64).is_ok());
+        assert!(check_remove_depth(65).is_err());
+    }
 
     #[test]
     fn rejects_traversal_and_bad_names() {

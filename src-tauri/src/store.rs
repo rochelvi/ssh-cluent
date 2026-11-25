@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Mutex};
 
+use crate::local_path::{expand_home, require_local_path};
+
 /// Service name under which older versions saved secrets in Windows Credential
 /// Manager. Used only to wipe those leftovers.
 const LEGACY_KEYRING_SERVICE: &str = "ssh-cluent";
@@ -139,6 +141,9 @@ impl Store {
         }
         if host.label.chars().any(char::is_control) || host.group.chars().any(char::is_control) {
             bail!("Название или группа содержат управляющие символы");
+        }
+        if let Some(path) = &host.key_path {
+            require_local_path(&expand_home(path.trim()))?;
         }
         for f in &host.forwards {
             if !f.bind_host.trim().is_empty() {

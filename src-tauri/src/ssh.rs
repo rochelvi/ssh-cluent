@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -30,6 +29,7 @@ use crate::{
     error::{AuthFailed, HostKeyProblem},
     forward,
     known_hosts::{KeyCheck, KnownHosts},
+    local_path::{expand_home, require_local_path},
     store::{AuthMethod, ForwardKind, Host},
 };
 
@@ -386,15 +386,6 @@ fn status(f: &crate::store::Forward, error: Option<String>) -> ForwardStatus {
     }
 }
 
-fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~") {
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            return PathBuf::from(home).join(rest.trim_start_matches(['/', '\\']));
-        }
-    }
-    PathBuf::from(path)
-}
-
 async fn authenticate(handle: &mut SshHandle, host: &Host, secret: Option<String>) -> Result<()> {
     let user = host.username.clone();
     match host.auth {
@@ -439,6 +430,7 @@ async fn authenticate(handle: &mut SshHandle, host: &Host, secret: Option<String
                 .filter(|p| !p.trim().is_empty())
                 .ok_or_else(|| anyhow!("Не указан файл приватного ключа"))?;
             let path = expand_home(path.trim());
+            require_local_path(&path)?;
             if !path.exists() {
                 bail!("Файл ключа не найден: {}", path.display());
             }

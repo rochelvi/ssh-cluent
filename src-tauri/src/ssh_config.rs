@@ -14,25 +14,22 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::store::{AuthMethod, Forward, ForwardKind, Host};
+use crate::{
+    local_path::{expand_home, home, require_local_path},
+    store::{AuthMethod, Forward, ForwardKind, Host},
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub host: Host,
-    /// The identity file referenced by the config does not exist.
+    /// The identity file referenced by the config does not exist or was rejected.
     pub key_missing: bool,
 }
 
 struct Block {
     patterns: Vec<String>,
     options: Vec<(String, String)>,
-}
-
-fn home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -126,17 +123,11 @@ fn matches(patterns: &[String], alias: &str) -> bool {
     any
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix('~') {
-        if let Some(h) = home() {
-            return h.join(rest.trim_start_matches(['/', '\\']));
-        }
-    }
-    PathBuf::from(p)
-}
-
 fn expand_include(arg: &str) -> Vec<PathBuf> {
-    let p = expand_tilde(arg);
+    let p = expand_home(arg);
+    if require_local_path(&p).is_err() {
+        return vec![];
+    }
     let p = if p.is_absolute() {
         p
     } else {
@@ -145,6 +136,9 @@ fn expand_include(arg: &str) -> Vec<PathBuf> {
             None => p,
         }
     };
+    if require_local_path(&p).is_err() {
+        return vec![];
+    }
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -158,7 +152,7 @@ fn expand_include(arg: &str) -> Vec<PathBuf> {
             rd.filter_map(|e| e.ok())
                 .filter(|e| glob(&name, &e.file_name().to_string_lossy()))
                 .map(|e| e.path())
-                .filter(|p| p.is_file())
+                .filter(|p| require_local_path(p).is_ok() && p.is_file())
                 .collect()
         })
         .unwrap_or_default();
@@ -169,8 +163,12 @@ fn expand_include(arg: &str) -> Vec<PathBuf> {
 /// Reads a config file, inlining `Include`d files. Each file is read at most
 /// once, so include cycles (e.g. `Include *` in ~/.ssh/config) cannot blow up.
 fn read_lines(path: &Path, depth: u32, seen: &mut HashSet<PathBuf>, out: &mut Vec<String>) -> Result<()> {
+    if depth > 16 {
+        return Ok(());
+    }
+    require_local_path(path)?;
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if depth > 16 || !seen.insert(key) {
+    if !seen.insert(key) {
         return Ok(());
     }
     let text = std::fs::read_to_string(path)
@@ -269,7 +267,7 @@ fn default_identity() -> Option<PathBuf> {
     ["id_ed25519", "id_ecdsa", "id_rsa"]
         .iter()
         .map(|n| ssh.join(n))
-        .find(|p| p.is_file())
+        .find(|p| require_local_path(p).is_ok() && p.is_file())
 }
 
 pub fn parse(path: &Path, default_user: &str) -> Result<Vec<Candidate>> {
@@ -341,10 +339,22 @@ pub fn parse(path: &Path, default_user: &str) -> Result<Vec<Candidate>> {
         let user = user.unwrap_or_else(|| fallback_user.clone());
         let hostname = expand_tokens(&hostname.unwrap_or_else(|| alias.clone()), &alias, &alias, &user);
         let key_path = match identity {
-            Some(id) => Some(expand_tilde(&expand_tokens(&id, &alias, &hostname, &user))),
+            Some(id) => Some(expand_home(&expand_tokens(&id, &alias, &hostname, &user))),
             None => default_identity(),
         };
-        let key_missing = key_path.as_ref().is_some_and(|p| !p.is_file());
+        let auth = if key_path.is_some() {
+            AuthMethod::Key
+        } else {
+            AuthMethod::Password
+        };
+        let (key_path, key_missing) = match key_path {
+            Some(p) if require_local_path(&p).is_ok() => {
+                let missing = !p.is_file();
+                (Some(p), missing)
+            }
+            Some(_) => (None, true),
+            None => (None, false),
+        };
 
         out.push(Candidate {
             key_missing,
@@ -355,7 +365,7 @@ pub fn parse(path: &Path, default_user: &str) -> Result<Vec<Candidate>> {
                 hostname,
                 port: port.unwrap_or(22),
                 username: user,
-                auth: if key_path.is_some() { AuthMethod::Key } else { AuthMethod::Password },
+                auth,
                 key_path: key_path.map(|p| p.display().to_string()),
                 forwards,
             },
@@ -418,11 +428,44 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a");
         let b = dir.join("b");
-        std::fs::write(&a, format!("Include {}\nInclude {}\nHost one\n", b.display(), a.display())).unwrap();
-        std::fs::write(&b, format!("Include {}\nHost two\n", a.display())).unwrap();
+        std::fs::write(&a, format!("Include \"{}\"\nInclude \"{}\"\nHost one\n", b.display(), a.display())).unwrap();
+        std::fs::write(&b, format!("Include \"{}\"\nHost two\n", a.display())).unwrap();
         let hosts = parse(&a, "u").unwrap();
         let names: Vec<_> = hosts.iter().map(|c| c.host.label.as_str()).collect();
         assert_eq!(names, ["two", "one"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preview_discards_blocked_identity_paths() {
+        let dir = std::env::temp_dir().join(format!("cluent-paths-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let cfg = dir.join("config");
+        let key = dir.join("local key");
+        std::fs::write(&key, "local fixture").unwrap();
+        std::fs::write(
+            &cfg,
+            format!(
+                "Host included\nInclude \"{}/extra-*\"\nIdentityFile \"{}\"\nHost blocked\nIdentityFile {}\n",
+                dir.display(),
+                key.display(),
+                r"\\?\C:\blocked\key"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("extra-host"), "User local-user\n").unwrap();
+
+        let hosts = parse(&cfg, "fallback").unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host.username, "local-user");
+        assert_eq!(hosts[0].host.key_path.as_deref(), key.to_str());
+        assert!(!hosts[0].key_missing);
+        assert_eq!(hosts[1].host.auth, AuthMethod::Key);
+        assert!(hosts[1].host.key_path.is_none());
+        assert!(hosts[1].key_missing);
+        assert!(expand_include(r"\\?\C:\blocked\*.conf").is_empty());
+        assert!(expand_include(r"\\?\C:\blocked\config").is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
