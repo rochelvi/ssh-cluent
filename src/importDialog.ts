@@ -59,7 +59,13 @@ export async function importSshConfig(existing: Host[]): Promise<number> {
             { class: "badges" },
             exists ? h("span", { class: "badge warn-badge" }, "уже есть") : null,
             h("span", { class: "badge", title: x.keyPath ?? "" }, x.auth === "key" ? "ключ" : "пароль"),
-            c.keyMissing ? h("span", { class: "badge warn-badge", title: x.keyPath ?? "" }, "ключ не найден") : null,
+            c.keyMissing
+              ? h(
+                  "span",
+                  { class: "badge warn-badge", title: x.keyPath ?? "" },
+                  x.keyPath ? "ключ не найден" : "путь к ключу заблокирован",
+                )
+              : null,
             x.forwards.length ? h("span", { class: "badge" }, `туннели: ${x.forwards.length}`) : null,
             exposed(x.forwards).length
               ? h(

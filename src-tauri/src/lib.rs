@@ -1,6 +1,7 @@
 mod error;
 mod forward;
 mod known_hosts;
+mod local_path;
 mod settings;
 mod sftp;
 mod ssh;
@@ -73,11 +74,6 @@ fn ssh_config_preview(state: State<'_, AppState>, path: Option<String>) -> CmdRe
             message: "Не удалось определить домашнюю папку".into(),
         })?,
     };
-    if !path.is_file() {
-        return Err(CmdError::Message {
-            message: format!("Файл не найден: {}", path.display()),
-        });
-    }
     let hosts = ssh_config::parse(&path, &state.settings.get().default_username)?;
     Ok(ImportPreview {
         path: path.display().to_string(),
